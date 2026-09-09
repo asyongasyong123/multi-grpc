@@ -5,6 +5,7 @@ set -euo pipefail
 # 🚀 GCP-XRAY MULTI-ENGINE DEPLOYER (4 ENGINES + gRPC)
 # ✅ ENGINES: OPENRESTY, ENVOY, HAPROXY, CADDY
 # ✅ PROTOCOLS: TROJAN (WS/gRPC), VLESS (WS/gRPC)
+# ✅ FIXED: 400 Error — Sniffing + WebSocket Headers
 # ===================================================
 
 GREEN='\033[1;32m'
@@ -166,13 +167,13 @@ deploy_new_service() {
               read -p "Choose preset [1-3]: " AUTO_CHOICE </dev/tty
               case $AUTO_CHOICE in
                   1) MEMORY="1Gi"; CPU="1"; CONCURRENCY="1000" ;;
-                  2) MEMORY="2Gi"; CPU="2"; CONCURRENCY="1000" ;;
-                  3) MEMORY="4Gi"; CPU="2"; CONCURRENCY="1000" ;;
+                  2) MEMORY="4Gi"; CPU="2"; CONCURRENCY="1000" ;;
+                  3) MEMORY="4Gi"; CPU="4"; CONCURRENCY="1000" ;;
                   *) echo -e "${YELLOW}Using Balanced preset${NC}"; MEMORY="2Gi"; CPU="2"; CONCURRENCY="1000" ;;
               esac
               TIMEOUT="3600"
-              MIN_INST="0"
-              MAX_INST="1"
+              MIN_INST="1"
+              MAX_INST="4"
               echo -e "${GREEN}✅ Applied: $MEMORY | $CPU vCPU${NC}"
               break
               ;;
@@ -211,11 +212,11 @@ deploy_new_service() {
 
               TIMEOUT="3600"
 
-              read -p "Min Instances [Default: 0]: " MIN_INST </dev/tty
-              MIN_INST=${MIN_INST:-0}
+              read -p "Min Instances [Default: 1]: " MIN_INST </dev/tty
+              MIN_INST=${MIN_INST:-1}
 
-              read -p "Max Instances [Default: 1]: " MAX_INST </dev/tty
-              MAX_INST=${MAX_INST:-1}
+              read -p "Max Instances [Default: 4]: " MAX_INST </dev/tty
+              MAX_INST=${MAX_INST:-4}
 
               echo -e "${GREEN}✅ Custom Selected: $MEMORY RAM | $CPU vCPU | Max Inst: $MAX_INST${NC}"
               break
@@ -232,7 +233,7 @@ deploy_new_service() {
 
   cd "$BUILD_DIR" || exit 1
 
-  # XRay Config with WS (10001, 10002) and gRPC (10003, 10004)
+  # ✅ XRAY CONFIG — Added Sniffing (FIXED 400 Error)
   cat > config.json <<'EOF'
 {
   "log": { "loglevel": "warning" },
@@ -240,22 +241,44 @@ deploy_new_service() {
   "policy": { "levels": { "0": { "handshake": 2, "connIdle": 3600, "bufferSize": 1048576 } } },
   "inbounds": [
     {
-      "tag": "trojan-ws", "port": 10001, "listen": "127.0.0.1", "protocol": "trojan",
+      "tag": "trojan-ws",
+      "port": 10001,
+      "listen": "127.0.0.1",
+      "protocol": "trojan",
       "settings": { "clients": [{"password": "gcp-xray", "level": 0}] },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/trojan-ws" } }
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"], "routeOnly": true },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": { "path": "/trojan-ws" },
+        "sockopt": { "tcpNoDelay": true, "tcpKeepAliveIdle": 300, "tcpKeepAliveInterval": 30 }
+      }
     },
     {
-      "tag": "vless-ws", "port": 10002, "listen": "127.0.0.1", "protocol": "vless",
+      "tag": "vless-ws",
+      "port": 10002,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
       "settings": { "clients": [{"id": "a1b2c3d4-5678-40ef-98ab-cdef01234567", "level": 0}], "decryption": "none" },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/vless-ws" } }
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"], "routeOnly": true },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": { "path": "/vless-ws" },
+        "sockopt": { "tcpNoDelay": true, "tcpKeepAliveIdle": 300, "tcpKeepAliveInterval": 30 }
+      }
     },
     {
-      "tag": "trojan-grpc", "port": 10003, "listen": "127.0.0.1", "protocol": "trojan",
+      "tag": "trojan-grpc",
+      "port": 10003,
+      "listen": "127.0.0.1",
+      "protocol": "trojan",
       "settings": { "clients": [{"password": "gcp-xray", "level": 0}] },
       "streamSettings": { "network": "grpc", "grpcSettings": { "serviceName": "trojan-grpc" } }
     },
     {
-      "tag": "vless-grpc", "port": 10004, "listen": "127.0.0.1", "protocol": "vless",
+      "tag": "vless-grpc",
+      "port": 10004,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
       "settings": { "clients": [{"id": "a1b2c3d4-5678-40ef-98ab-cdef01234567", "level": 0}], "decryption": "none" },
       "streamSettings": { "network": "grpc", "grpcSettings": { "serviceName": "vless-grpc" } }
     }
@@ -269,13 +292,20 @@ EOF
   if [ "$ENGINE" = "openresty" ]; then
     cat > nginx.conf <<EOF
 worker_processes auto;
-events { worker_connections 4096; }
+worker_rlimit_nofile 10240;
+events { worker_connections 4096; use epoll; multi_accept on; }
 http {
   include mime.types;
   default_type text/html;
+  sendfile on; tcp_nodelay on;
+  keepalive_timeout 3600; keepalive_requests 100000;
+  client_max_body_size 0;
+  proxy_buffering off; proxy_request_buffering off;
+  proxy_http_version 1.1;
+  proxy_connect_timeout 10s; proxy_send_timeout 3600s; proxy_read_timeout 3600s;
   server {
-    listen 8080;
-    http2 on;
+    listen 8080 http2;
+    server_name _;
 
     location /health { return 200 "OK\n"; add_header Content-Type text/plain; }
     location / {
@@ -288,6 +318,7 @@ http {
       proxy_set_header Upgrade \$http_upgrade;
       proxy_set_header Connection "upgrade";
       proxy_set_header Host \$host;
+      proxy_set_header X-Real-IP \$remote_addr;
     }
     location /vless-ws {
       proxy_pass http://127.0.0.1:10002;
@@ -295,6 +326,7 @@ http {
       proxy_set_header Upgrade \$http_upgrade;
       proxy_set_header Connection "upgrade";
       proxy_set_header Host \$host;
+      proxy_set_header X-Real-IP \$remote_addr;
     }
     location /trojan-grpc {
       grpc_pass grpc://127.0.0.1:10003;
@@ -310,12 +342,14 @@ EOF
     cat > entrypoint.sh <<'EOF'
 #!/bin/sh
 /usr/local/bin/xray run -c /etc/xray.json &
+sleep 2
 exec /usr/local/openresty/bin/openresty -g 'daemon off;'
 EOF
     cat > Dockerfile <<'EOF'
 FROM alpine:3.20 AS builder
-RUN apk add --no-cache curl unzip
-RUN curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip && unzip -q xray.zip xray geosite.dat geoip.dat && chmod +x xray
+RUN apk add --no-cache curl unzip ca-certificates
+RUN curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip && \
+    unzip -q xray.zip xray geosite.dat geoip.dat && chmod +x xray
 FROM openresty/openresty:alpine-fat
 COPY --from=builder /xray /usr/local/bin/xray
 COPY --from=builder /geosite.dat /usr/local/share/xray/
@@ -407,12 +441,14 @@ EOF
     cat > entrypoint.sh <<'EOF'
 #!/bin/sh
 /usr/local/bin/xray run -c /etc/xray.json &
+sleep 2
 exec envoy -c /etc/envoy.yaml
 EOF
     cat > Dockerfile <<'EOF'
 FROM alpine:3.20 AS builder
-RUN apk add --no-cache curl unzip
-RUN curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip && unzip -q xray.zip xray geosite.dat geoip.dat && chmod +x xray
+RUN apk add --no-cache curl unzip ca-certificates
+RUN curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip && \
+    unzip -q xray.zip xray geosite.dat geoip.dat && chmod +x xray
 FROM envoyproxy/envoy:v1.30-latest
 COPY --from=builder /xray /usr/local/bin/xray
 COPY --from=builder /geosite.dat /usr/local/share/xray/
@@ -475,12 +511,14 @@ EOF
     cat > entrypoint.sh <<'EOF'
 #!/bin/sh
 /usr/local/bin/xray run -c /etc/xray.json &
+sleep 2
 exec haproxy -f /usr/local/etc/haproxy/haproxy.cfg -db
 EOF
     cat > Dockerfile <<'EOF'
 FROM alpine:3.20 AS builder
-RUN apk add --no-cache curl unzip
-RUN curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip && unzip -q xray.zip xray geosite.dat geoip.dat && chmod +x xray
+RUN apk add --no-cache curl unzip ca-certificates
+RUN curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip && \
+    unzip -q xray.zip xray geosite.dat geoip.dat && chmod +x xray
 FROM haproxy:2.8-alpine
 COPY --from=builder /xray /usr/local/bin/xray
 COPY --from=builder /geosite.dat /usr/local/share/xray/
@@ -536,12 +574,14 @@ EOF
     cat > entrypoint.sh <<'EOF'
 #!/bin/sh
 /usr/local/bin/xray run -c /etc/xray.json &
+sleep 2
 exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 EOF
     cat > Dockerfile <<'EOF'
 FROM alpine:3.20 AS builder
-RUN apk add --no-cache curl unzip
-RUN curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip && unzip -q xray.zip xray geosite.dat geoip.dat && chmod +x xray
+RUN apk add --no-cache curl unzip ca-certificates
+RUN curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip && \
+    unzip -q xray.zip xray geosite.dat geoip.dat && chmod +x xray
 FROM caddy:2-alpine
 COPY --from=builder /xray /usr/local/bin/xray
 COPY --from=builder /geosite.dat /usr/local/share/xray/
@@ -582,11 +622,16 @@ EOF
   CLOUD_RUN_URL=$(gcloud run services describe "$CLOUD_RUN_SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')
   DOMAIN=$(echo "$CLOUD_RUN_URL" | sed 's|https://||')
 
+  TROJAN_LINK="trojan://gcp-xray@firebase-settings.crashlytics.com:443?type=ws&host=${DOMAIN}&path=%2Ftrojan-ws&security=tls&sni=firebase-settings.crashlytics.com#${CLOUD_RUN_SERVICE_NAME}"
+  VLESS_LINK="vless://a1b2c3d4-5678-40ef-98ab-cdef01234567@firebaseremoteconfigrealtime.googleapis.com:443?encryption=none&type=ws&host=${DOMAIN}&path=%2Fvless-ws&security=tls&sni=firebaseremoteconfigrealtime.googleapis.com#${CLOUD_RUN_SERVICE_NAME}"
+
   clear
   echo -e "\n${CYAN}=========================================${NC}"
   echo -e "${GREEN}✅ DEPLOYMENT SUCCESS! (${DISPLAY_ENGINE})${NC}"
   echo -e "${CYAN}=========================================${NC}"
-  echo -e "${GREEN}🔗 URL:${NC} https://$DOMAIN"
+  echo -e "${GREEN}🔗 URL:${NC} $CLOUD_RUN_URL"
+  echo -e "${GREEN}🔹 TROJAN LINK:${NC}\n$TROJAN_LINK\n"
+  echo -e "${GREEN}🔹 VLESS LINK:${NC}\n$VLESS_LINK"
   echo -e "${CYAN}=========================================${NC}"
 
   read -p $'\nPress [Enter] to return...' </dev/tty
