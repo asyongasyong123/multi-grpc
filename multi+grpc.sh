@@ -53,25 +53,48 @@ list_deployed_services() {
 }
 
 select_region() {
-  echo -e "\n=== GCP CLOUD RUN REGION ==="
+  echo -e "\n=== GCP CLOUD RUN REGION SELECTION ==="
+  echo "--- North America ---"
   echo "1) us-central1      (Iowa, US 🇺🇸)"
   echo "2) us-east1         (South Carolina, US 🇺🇸)"
-  echo "3) asia-east1       (Taiwan 🇹🇼 — RECOMMENDED!)"
-  echo "4) asia-southeast1  (Singapore 🇸🇬)"
-  echo "5) asia-northeast1  (Tokyo, Japan 🇯🇵)"
-  echo "0) Custom region code"
+  echo "3) us-east4         (N. Virginia, US 🇺🇸)"
+  echo "4) us-west1         (Oregon, US 🇺🇸)"
   echo ""
+  echo "--- Asia Pacific ---"
+  echo "5) asia-east1       (Taiwan 🇹🇼 — RECOMMENDED!)"
+  echo "6) asia-southeast1  (Singapore 🇸🇬)"
+  echo "7) asia-northeast1  (Tokyo, Japan 🇯🇵)"
+  echo "8) asia-northeast3  (Seoul, South Korea 🇰🇷)"
+  echo "9) asia-south1      (Mumbai, India 🇮🇳)"
+  echo ""
+  echo "--- Europe ---"
+  echo "10) europe-west1     (Belgium 🇧🇪)"
+  echo "11) europe-west4    (Netherlands 🇳🇱)"
+  echo "12) europe-west9    (Paris, France 🇫🇷)"
+  echo ""
+  echo "0) Enter custom region code"
+  echo ""
+
   read -p "Enter region number: " REGION_NUM </dev/tty
 
   case $REGION_NUM in
     1) REGION="us-central1" ;;
     2) REGION="us-east1" ;;
-    3) REGION="asia-east1" ;;
-    4) REGION="asia-southeast1" ;;
-    5) REGION="asia-northeast1" ;;
+    3) REGION="us-east4" ;;
+    4) REGION="us-west1" ;;
+    5) REGION="asia-east1" ;;
+    6) REGION="asia-southeast1" ;;
+    7) REGION="asia-northeast1" ;;
+    8) REGION="asia-northeast3" ;;
+    9) REGION="asia-south1" ;;
+    10) REGION="europe-west1" ;;
+    11) REGION="europe-west4" ;;
+    12) REGION="europe-west9" ;;
     0) read -p "Type full region code: " REGION </dev/tty ;;
-    *) REGION="asia-east1" ;;
+    *) echo -e "${YELLOW}⚠️ Invalid! Using asia-east1${NC}"; REGION="asia-east1" ;;
   esac
+
+  echo -e "${GREEN}✅ Selected Region:${NC} $REGION"
 }
 
 deploy_new_service() {
@@ -86,6 +109,9 @@ deploy_new_service() {
 
   gcloud services enable run.googleapis.com cloudbuild.googleapis.com --project="$PROJECT_ID" --quiet
 
+  # ==============================================
+  # 🎯 PROXY ENGINE SELECTOR
+  # ==============================================
   echo -e "\n${CYAN}=========================================${NC}"
   echo -e "${GREEN}          CHOOSE PROXY ENGINE${NC}"
   echo -e "${CYAN}=========================================${NC}"
@@ -104,18 +130,105 @@ deploy_new_service() {
       esac
   done
 
+  # ==============================================
+  # 💵 BILLING MODE
+  # ==============================================
+  echo -e "\n${CYAN}=========================================${NC}"
+  echo -e "${GREEN}          BILLING MODE${NC}"
+  echo -e "${CYAN}=========================================${NC}"
+  echo -e "${YELLOW}Instance-Based = Stable, No Throttling${NC}"
+  echo "1) Request-Based  |  2) Instance-Based"
+  while true; do
+      read -p "Select [1-2]: " BILLING_CHOICE </dev/tty
+      case $BILLING_CHOICE in
+          1) BILLING_MODE="request"; BILLING_FLAG="--cpu-throttling"; break ;;
+          2) BILLING_MODE="instance"; BILLING_FLAG="--no-cpu-throttling"; break ;;
+          *) echo -e "${RED}Enter 1 or 2 only${NC}" ;;
+      esac
+  done
+
+  # ==============================================
+  # ⚙️ RESOURCE CONFIG MODE
+  # ==============================================
+  echo -e "\n${CYAN}=========================================${NC}"
+  echo -e "${GREEN}      RESOURCE CONFIG MODE${NC}"
+  echo -e "${CYAN}=========================================${NC}"
+  echo -e "${GREEN}1) AUTO PRESETS  |  Recommended${NC}"
+  echo -e "${YELLOW}2) MANUAL SETUP  |  Full Memory & vCPU Range${NC}"
+  while true; do
+      read -p "Select Mode [1-2]: " RES_MODE </dev/tty
+      case $RES_MODE in
+          1)
+              echo -e "\n${CYAN}--- AUTO PRESETS ---${NC}"
+              echo "1) Basic:    1Gi RAM + 1 vCPU"
+              echo "2) Balanced: 2Gi RAM + 2 vCPU ✅"
+              echo "3) Turbo:    4Gi RAM + 2 vCPU (High Concurrency)"
+              read -p "Choose preset [1-3]: " AUTO_CHOICE </dev/tty
+              case $AUTO_CHOICE in
+                  1) MEMORY="1Gi"; CPU="1"; CONCURRENCY="1000" ;;
+                  2) MEMORY="2Gi"; CPU="2"; CONCURRENCY="1000" ;;
+                  3) MEMORY="4Gi"; CPU="2"; CONCURRENCY="1000" ;;
+                  *) echo -e "${YELLOW}Using Balanced preset${NC}"; MEMORY="2Gi"; CPU="2"; CONCURRENCY="1000" ;;
+              esac
+              TIMEOUT="3600"
+              MIN_INST="0"
+              MAX_INST="1"
+              echo -e "${GREEN}✅ Applied: $MEMORY | $CPU vCPU${NC}"
+              break
+              ;;
+          2)
+              echo -e "\n${YELLOW}--- MANUAL SETUP (UNLOCKED ALL SPECS) ---${NC}"
+              echo "Select Memory:"
+              echo "1) 256Mi   2) 512Mi   3) 1Gi   4) 2Gi"
+              echo "5) 4Gi     6) 8Gi     7) 16Gi  8) Custom input"
+              read -p "Select Memory [1-8]: " MEM </dev/tty
+              case $MEM in
+                  1) MEMORY="256Mi" ;;
+                  2) MEMORY="512Mi" ;;
+                  3) MEMORY="1Gi" ;;
+                  4) MEMORY="2Gi" ;;
+                  5) MEMORY="4Gi" ;;
+                  6) MEMORY="8Gi" ;;
+                  7) MEMORY="16Gi" ;;
+                  8) read -p "Type custom memory (e.g. 512Mi, 4Gi, 32Gi): " MEMORY </dev/tty ;;
+                  *) MEMORY="1Gi" ;;
+              esac
+
+              echo -e "\nSelect vCPU:"
+              echo "1) 1 vCPU   2) 2 vCPU   3) 4 vCPU   4) 8 vCPU   5) Custom input"
+              read -p "Select vCPU [1-5]: " CPU_SEL </dev/tty
+              case $CPU_SEL in
+                  1) CPU="1" ;;
+                  2) CPU="2" ;;
+                  3) CPU="4" ;;
+                  4) CPU="8" ;;
+                  5) read -p "Type custom vCPU (e.g. 0.5, 1, 2, 4, 8): " CPU </dev/tty ;;
+                  *) CPU="1" ;;
+              esac
+
+              read -p "Max Connections/Concurrency [Default: 1000]: " CONCURRENCY </dev/tty
+              CONCURRENCY=${CONCURRENCY:-1000}
+
+              TIMEOUT="3600"
+
+              read -p "Min Instances [Default: 0]: " MIN_INST </dev/tty
+              MIN_INST=${MIN_INST:-0}
+
+              read -p "Max Instances [Default: 1]: " MAX_INST </dev/tty
+              MAX_INST=${MAX_INST:-1}
+
+              echo -e "${GREEN}✅ Custom Selected: $MEMORY RAM | $CPU vCPU | Max Inst: $MAX_INST${NC}"
+              break
+              ;;
+          *) echo -e "${RED}Enter 1 or 2 only${NC}" ;;
+      esac
+  done
+
   SUFFIX=$(openssl rand -hex 3)
   CLOUD_RUN_SERVICE_NAME="gcp-xray-${ENGINE}-${SUFFIX}"
 
   BUILD_DIR=$(mktemp -d)
   trap 'rm -rf "$BUILD_DIR"' EXIT
-
-  MEMORY="2Gi"
-  CPU="2"
-  CONCURRENCY="1000"
-  TIMEOUT="3600"
-  MIN_INST="0"
-  MAX_INST="1"
 
   cd "$BUILD_DIR" || exit 1
 
@@ -464,26 +577,16 @@ EOF
     --port 8080 \
     --use-http2 \
     --session-affinity \
-    --execution-environment gen2 --no-cpu-throttling --cpu-boost --quiet
+    --execution-environment gen2 $BILLING_FLAG --cpu-boost --quiet
 
   CLOUD_RUN_URL=$(gcloud run services describe "$CLOUD_RUN_SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')
   DOMAIN=$(echo "$CLOUD_RUN_URL" | sed 's|https://||')
-
-  TROJAN_WS_LINK="trojan://gcp-xray@firebaseremoteconfigrealtime.googleapis.com:443?type=ws&host=${DOMAIN}&headerType=none&path=%2Ftrojan-ws&security=tls&sni=firebaseremoteconfigrealtime.googleapis.com#${CLOUD_RUN_SERVICE_NAME}-Trojan-WS"
-  VLESS_WS_LINK="vless://a1b2c3d4-5678-40ef-98ab-cdef01234567@firebaseremoteconfigrealtime.googleapis.com:443?encryption=none&type=ws&host=${DOMAIN}&headerType=none&path=%2Fvless-ws&security=tls&sni=firebaseremoteconfigrealtime.googleapis.com#${CLOUD_RUN_SERVICE_NAME}-VLESS-WS"
-  TROJAN_GRPC_LINK="trojan://gcp-xray@firebaseremoteconfigrealtime.googleapis.com:443?type=grpc&serviceName=trojan-grpc&host=${DOMAIN}&security=tls&sni=firebaseremoteconfigrealtime.googleapis.com#${CLOUD_RUN_SERVICE_NAME}-Trojan-gRPC"
-  VLESS_GRPC_LINK="vless://a1b2c3d4-5678-40ef-98ab-cdef01234567@firebaseremoteconfigrealtime.googleapis.com:443?encryption=none&type=grpc&serviceName=vless-grpc&host=${DOMAIN}&security=tls&sni=firebaseremoteconfigrealtime.googleapis.com#${CLOUD_RUN_SERVICE_NAME}-VLESS-gRPC"
 
   clear
   echo -e "\n${CYAN}=========================================${NC}"
   echo -e "${GREEN}✅ DEPLOYMENT SUCCESS! (${DISPLAY_ENGINE})${NC}"
   echo -e "${CYAN}=========================================${NC}"
-  echo -e "${GREEN}🌐 DOMAIN:${NC} $DOMAIN"
-  echo ""
-  echo -e "${GREEN}🔹 TROJAN (WS):${NC}\n$TROJAN_WS_LINK\n"
-  echo -e "${GREEN}🔹 VLESS (WS):${NC}\n$VLESS_WS_LINK\n"
-  echo -e "${GREEN}🔹 TROJAN (gRPC):${NC}\n$TROJAN_GRPC_LINK\n"
-  echo -e "${GREEN}🔹 VLESS (gRPC):${NC}\n$VLESS_GRPC_LINK"
+  echo -e "${GREEN}🔗 URL:${NC} https://$DOMAIN"
   echo -e "${CYAN}=========================================${NC}"
 
   read -p $'\nPress [Enter] to return...' </dev/tty
